@@ -10,6 +10,29 @@
 #include "i2c.h"
 
 //
+// @简介：带超时的标志位等待
+//  I2C 总线异常时（例如没接从机、总线上没有上拉电阻），BUSY/SB 等标志可能
+//  一直不翻转，这里加超时，避免程序死等。
+// @返回值：0 - 等到， -1 - 超时
+//
+#define MY_I2C_TIMEOUT   100000UL
+
+static int My_I2C_WaitFlag(I2C_TypeDef *I2Cx, uint32_t Flag, FlagStatus Status)
+{
+	uint32_t Timeout = MY_I2C_TIMEOUT;
+	
+	while(I2C_GetFlagStatus(I2Cx, Flag) != Status)
+	{
+		if(--Timeout == 0)
+		{
+			return -1;
+		}
+	}
+	
+	return 0;
+}
+
+//
 // @简介：通过I2C向从机写入多个字节
 // 
 // @参数 I2Cx：填写要操作的I2C的名称，可以是I2C1或I2C2
@@ -17,22 +40,31 @@
 // @参数 pData：要发送的数据（数组）
 // @参数 Size：要发送的数据的数量，以字节为单位
 //
-// @返回值：0 - 发送成功， -1 - 寻址失败， -2 - 数据被拒收
+// @返回值：0 - 发送成功， -1 - 寻址失败， -2 - 数据被拒收， -3 - 超时(总线异常)
 //
 __weak int My_I2C_SendBytes(I2C_TypeDef *I2Cx, uint8_t Addr, const uint8_t *pData, uint16_t Size)
 {
 	// #1. 等待总线空闲
-	while(I2C_GetFlagStatus(I2Cx, I2C_FLAG_BUSY) == SET);
+	if(My_I2C_WaitFlag(I2Cx, I2C_FLAG_BUSY, RESET) != 0)
+	{
+		return -3; // 总线一直忙（例如从机没接、总线没有上拉）
+	}
 	
 	// #2. 发送起始位
 	I2C_GenerateSTART(I2Cx, ENABLE);
 	
-	while(I2C_GetFlagStatus(I2Cx, I2C_FLAG_SB) == RESET);
+	if(My_I2C_WaitFlag(I2Cx, I2C_FLAG_SB, SET) != 0)
+	{
+		I2C_GenerateSTOP(I2Cx, ENABLE);
+		return -3; // 起始位没能发出去
+	}
 	
 	// #3. 寻址阶段
 	I2C_ClearFlag(I2Cx, I2C_FLAG_AF);
 	
 	I2C_SendData(I2Cx, Addr & 0xfe);
+	
+	uint32_t Timeout = MY_I2C_TIMEOUT;
 	
 	while(1)
 	{
@@ -45,6 +77,11 @@ __weak int My_I2C_SendBytes(I2C_TypeDef *I2Cx, uint8_t Addr, const uint8_t *pDat
 			I2C_GenerateSTOP(I2Cx, ENABLE);
 			return -1; // 寻址失败
 		}
+		if(--Timeout == 0)
+		{
+			I2C_GenerateSTOP(I2Cx, ENABLE);
+			return -3; // 超时
+		}
 	}
 	
 	// 清除ADDR
@@ -54,6 +91,8 @@ __weak int My_I2C_SendBytes(I2C_TypeDef *I2Cx, uint8_t Addr, const uint8_t *pDat
 	// #4. 发送数据
 	for(uint16_t i=0; i<Size; i++)
 	{
+		Timeout = MY_I2C_TIMEOUT;
+		
 		while(1)
 		{
 			if(I2C_GetFlagStatus(I2Cx, I2C_FLAG_AF) == SET)
@@ -65,10 +104,17 @@ __weak int My_I2C_SendBytes(I2C_TypeDef *I2Cx, uint8_t Addr, const uint8_t *pDat
 			{
 				break;
 			}
+			if(--Timeout == 0)
+			{
+				I2C_GenerateSTOP(I2Cx, ENABLE);
+				return -3; // 超时
+			}
 		}
 		
 		I2C_SendData(I2Cx, pData[i]);
 	}
+	
+	Timeout = MY_I2C_TIMEOUT;
 	
 	while(1)
 	{
@@ -81,6 +127,12 @@ __weak int My_I2C_SendBytes(I2C_TypeDef *I2Cx, uint8_t Addr, const uint8_t *pDat
 		if(I2C_GetFlagStatus(I2Cx, I2C_FLAG_BTF) == SET)
 		{
 			break;
+		}
+		
+		if(--Timeout == 0)
+		{
+				I2C_GenerateSTOP(I2Cx, ENABLE);
+				return -3; // 超时
 		}
 	}
 	
